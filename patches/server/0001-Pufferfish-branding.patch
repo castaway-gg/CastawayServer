@@ -15,7 +15,7 @@ index fb98936bb8a5488db75d676c5bcb4060597fbbf8..c6254bc5b9e2b65cd0f9f5ffa2d0b078
  dependencies {
 -    implementation(project(":paper-api"))
 -    implementation(project(":paper-mojangapi"))
-+    implementation(project(":pufferfish-api")) // Pufferfish // Paper
++    implementation(project(":castaway-api")) // Pufferfish // Paper
 +    // Pufferfish start
 +    implementation("io.papermc.paper:paper-mojangapi:1.19.2-R0.1-SNAPSHOT") {
 +        exclude("io.papermc.paper", "paper-api")
@@ -251,7 +251,7 @@ index 774556a62eb240da42e84db4502e2ed43495be17..80553face9c70c2a3d897681e7761df8
          String result = "Unknown-Version";
  
 -        InputStream stream = Bukkit.class.getClassLoader().getResourceAsStream("META-INF/maven/io.papermc.paper/paper-api/pom.properties");
-+        InputStream stream = Bukkit.class.getClassLoader().getResourceAsStream("META-INF/maven/gg.pufferfish.pufferfish/pufferfish-api/pom.properties"); // Pufferfish
++        InputStream stream = Bukkit.class.getClassLoader().getResourceAsStream("META-INF/maven/gg.pufferfish.pufferfish/castaway-api/pom.properties"); // Pufferfish
          Properties properties = new Properties();
  
          if (stream != null) {

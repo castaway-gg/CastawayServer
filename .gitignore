@@ -1,5 +1,5 @@
-pufferfish-api
-pufferfish-server
+castaway-api
+castaway-server
 
 build/
 .gradle/

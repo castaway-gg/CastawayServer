@@ -2,7 +2,7 @@
 [knowledgebase]: https://docs.pufferfish.host
 [discord]: https://discord.gg/reZw4vQV9H
 [downloads]: https://pufferfish.host/downloads
-[optguide]: https://docs.pufferfish.host/optimization/pufferfish-server-optimization-guide/
+[optguide]: https://docs.pufferfish.host/optimization/castaway-server-optimization-guide/
 
 # Pufferfish
 A highly optimized Paper fork designed for large servers requiring both maximum performance, stability, and "enterprise" features.
