@@ -1,0 +1,676 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Initial Source <auto@mated.null>
+Date: Mon, 18 Sep 2023 16:15:41 +0200
+Subject: [PATCH] Initial
+
+
+diff --git a/src/main/java/net/minecraft/world/entity/ai/behavior/VillagerPanicTrigger.java b/src/main/java/net/minecraft/world/entity/ai/behavior/VillagerPanicTrigger.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..646d9a121d908a2fc3e4e302484dd5cd1bfc6804
+--- /dev/null
++++ b/src/main/java/net/minecraft/world/entity/ai/behavior/VillagerPanicTrigger.java
+@@ -0,0 +1,53 @@
++package net.minecraft.world.entity.ai.behavior;
++
++import com.google.common.collect.ImmutableMap;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.world.entity.LivingEntity;
++import net.minecraft.world.entity.ai.Brain;
++import net.minecraft.world.entity.ai.memory.MemoryModuleType;
++import net.minecraft.world.entity.npc.Villager;
++import net.minecraft.world.entity.schedule.Activity;
++
++public class VillagerPanicTrigger extends Behavior<Villager> {
++    public VillagerPanicTrigger() {
++        super(ImmutableMap.of());
++    }
++
++    @Override
++    protected boolean canStillUse(ServerLevel world, Villager entity, long time) {
++        return isHurt(entity) || hasHostile(entity);
++    }
++
++    @Override
++    protected void start(ServerLevel serverLevel, Villager villager, long l) {
++        if (isHurt(villager) || hasHostile(villager)) {
++            Brain<?> brain = villager.getBrain();
++            if (!brain.isActive(Activity.PANIC)) {
++                brain.eraseMemory(MemoryModuleType.PATH);
++                brain.eraseMemory(MemoryModuleType.WALK_TARGET);
++                brain.eraseMemory(MemoryModuleType.LOOK_TARGET);
++                brain.eraseMemory(MemoryModuleType.BREED_TARGET);
++                brain.eraseMemory(MemoryModuleType.INTERACTION_TARGET);
++            }
++
++            brain.setActiveActivityIfPossible(Activity.PANIC);
++        }
++
++    }
++
++    @Override
++    protected void tick(ServerLevel world, Villager entity, long time) {
++        if (time % 100L == 0L) {
++            entity.spawnGolemIfNeeded(world, time, 3);
++        }
++
++    }
++
++    public static boolean hasHostile(LivingEntity entity) {
++        return entity.getBrain().hasMemoryValue(MemoryModuleType.NEAREST_HOSTILE);
++    }
++
++    public static boolean isHurt(LivingEntity entity) {
++        return entity.getBrain().hasMemoryValue(MemoryModuleType.HURT_BY);
++    }
++}
+diff --git a/src/main/java/net/minecraft/world/level/biome/Biome.java b/src/main/java/net/minecraft/world/level/biome/Biome.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..65012a12e1430956ef55ced56773e6354ac26444
+--- /dev/null
++++ b/src/main/java/net/minecraft/world/level/biome/Biome.java
+@@ -0,0 +1,380 @@
++package net.minecraft.world.level.biome;
++
++import com.google.common.collect.ImmutableList;
++import com.mojang.serialization.Codec;
++import com.mojang.serialization.MapCodec;
++import com.mojang.serialization.codecs.RecordCodecBuilder;
++import it.unimi.dsi.fastutil.longs.Long2FloatLinkedOpenHashMap;
++import java.util.Optional;
++import javax.annotation.Nullable;
++import net.minecraft.Util;
++import net.minecraft.core.BlockPos;
++import net.minecraft.core.Holder;
++import net.minecraft.core.HolderSet;
++import net.minecraft.core.RegistryCodecs;
++import net.minecraft.core.registries.Registries;
++import net.minecraft.resources.RegistryFileCodec;
++import net.minecraft.sounds.Music;
++import net.minecraft.sounds.SoundEvent;
++import net.minecraft.util.Mth;
++import net.minecraft.util.StringRepresentable;
++import net.minecraft.world.level.FoliageColor;
++import net.minecraft.world.level.GrassColor;
++import net.minecraft.world.level.LevelReader;
++import net.minecraft.world.level.LightLayer;
++import net.minecraft.world.level.block.Blocks;
++import net.minecraft.world.level.block.LiquidBlock;
++import net.minecraft.world.level.block.state.BlockState;
++import net.minecraft.world.level.levelgen.LegacyRandomSource;
++import net.minecraft.world.level.levelgen.WorldgenRandom;
++import net.minecraft.world.level.levelgen.synth.PerlinSimplexNoise;
++import net.minecraft.world.level.material.FluidState;
++import net.minecraft.world.level.material.Fluids;
++
++public final class Biome {
++    public static final Codec<Biome> DIRECT_CODEC = RecordCodecBuilder.create((instance) -> {
++        return instance.group(Biome.ClimateSettings.CODEC.forGetter((biome) -> {
++            return biome.climateSettings;
++        }), BiomeSpecialEffects.CODEC.fieldOf("effects").forGetter((biome) -> {
++            return biome.specialEffects;
++        }), BiomeGenerationSettings.CODEC.forGetter((biome) -> {
++            return biome.generationSettings;
++        }), MobSpawnSettings.CODEC.forGetter((biome) -> {
++            return biome.mobSettings;
++        })).apply(instance, Biome::new);
++    });
++    public static final Codec<Biome> NETWORK_CODEC = RecordCodecBuilder.create((instance) -> {
++        return instance.group(Biome.ClimateSettings.CODEC.forGetter((biome) -> {
++            return biome.climateSettings;
++        }), BiomeSpecialEffects.CODEC.fieldOf("effects").forGetter((biome) -> {
++            return biome.specialEffects;
++        })).apply(instance, (weather, effects) -> {
++            return new Biome(weather, effects, BiomeGenerationSettings.EMPTY, MobSpawnSettings.EMPTY);
++        });
++    });
++    public static final Codec<Holder<Biome>> CODEC = RegistryFileCodec.create(Registries.BIOME, DIRECT_CODEC);
++    public static final Codec<HolderSet<Biome>> LIST_CODEC = RegistryCodecs.homogeneousList(Registries.BIOME, DIRECT_CODEC);
++    private static final PerlinSimplexNoise TEMPERATURE_NOISE = new PerlinSimplexNoise(new WorldgenRandom(new LegacyRandomSource(1234L)), ImmutableList.of(0));
++    static final PerlinSimplexNoise FROZEN_TEMPERATURE_NOISE = new PerlinSimplexNoise(new WorldgenRandom(new LegacyRandomSource(3456L)), ImmutableList.of(-2, -1, 0));
++    /** @deprecated */
++    @Deprecated(
++        forRemoval = true
++    )
++    public static final PerlinSimplexNoise BIOME_INFO_NOISE = new PerlinSimplexNoise(new WorldgenRandom(new LegacyRandomSource(2345L)), ImmutableList.of(0));
++    private static final int TEMPERATURE_CACHE_SIZE = 1024;
++    public final Biome.ClimateSettings climateSettings;
++    private final BiomeGenerationSettings generationSettings;
++    private final MobSpawnSettings mobSettings;
++    private final BiomeSpecialEffects specialEffects;
++    private final ThreadLocal<Long2FloatLinkedOpenHashMap> temperatureCache = ThreadLocal.withInitial(() -> {
++        return Util.make(() -> {
++            Long2FloatLinkedOpenHashMap long2FloatLinkedOpenHashMap = new Long2FloatLinkedOpenHashMap(1024, 0.25F) {
++                protected void rehash(int i) {
++                }
++            };
++            long2FloatLinkedOpenHashMap.defaultReturnValue(Float.NaN);
++            return long2FloatLinkedOpenHashMap;
++        });
++    });
++
++    Biome(Biome.ClimateSettings weather, BiomeSpecialEffects effects, BiomeGenerationSettings generationSettings, MobSpawnSettings spawnSettings) {
++        this.climateSettings = weather;
++        this.generationSettings = generationSettings;
++        this.mobSettings = spawnSettings;
++        this.specialEffects = effects;
++    }
++
++    public int getSkyColor() {
++        return this.specialEffects.getSkyColor();
++    }
++
++    public MobSpawnSettings getMobSettings() {
++        return this.mobSettings;
++    }
++
++    public boolean hasPrecipitation() {
++        return this.climateSettings.hasPrecipitation();
++    }
++
++    public Biome.Precipitation getPrecipitationAt(BlockPos pos) {
++        if (!this.hasPrecipitation()) {
++            return Biome.Precipitation.NONE;
++        } else {
++            return this.coldEnoughToSnow(pos) ? Biome.Precipitation.SNOW : Biome.Precipitation.RAIN;
++        }
++    }
++
++    private float getHeightAdjustedTemperature(BlockPos pos) {
++        float f = this.climateSettings.temperatureModifier.modifyTemperature(pos, this.getBaseTemperature());
++        if (pos.getY() > 80) {
++            float g = (float)(TEMPERATURE_NOISE.getValue((double)((float)pos.getX() / 8.0F), (double)((float)pos.getZ() / 8.0F), false) * 8.0D);
++            return f - (g + (float)pos.getY() - 80.0F) * 0.05F / 40.0F;
++        } else {
++            return f;
++        }
++    }
++
++    /** @deprecated */
++    @Deprecated
++    public float getTemperature(BlockPos blockPos) {
++        long l = blockPos.asLong();
++        Long2FloatLinkedOpenHashMap long2FloatLinkedOpenHashMap = this.temperatureCache.get();
++        float f = long2FloatLinkedOpenHashMap.get(l);
++        if (!Float.isNaN(f)) {
++            return f;
++        } else {
++            float g = this.getHeightAdjustedTemperature(blockPos);
++            if (long2FloatLinkedOpenHashMap.size() == 1024) {
++                long2FloatLinkedOpenHashMap.removeFirstFloat();
++            }
++
++            long2FloatLinkedOpenHashMap.put(l, g);
++            return g;
++        }
++    }
++
++    public boolean shouldFreeze(LevelReader world, BlockPos blockPos) {
++        return this.shouldFreeze(world, blockPos, true);
++    }
++
++    public boolean shouldFreeze(LevelReader world, BlockPos pos, boolean doWaterCheck) {
++        if (this.warmEnoughToRain(pos)) {
++            return false;
++        } else {
++            if (pos.getY() >= world.getMinBuildHeight() && pos.getY() < world.getMaxBuildHeight() && world.getBrightness(LightLayer.BLOCK, pos) < 10) {
++                BlockState blockState = world.getBlockState(pos);
++                FluidState fluidState = world.getFluidState(pos);
++                if (fluidState.getType() == Fluids.WATER && blockState.getBlock() instanceof LiquidBlock) {
++                    if (!doWaterCheck) {
++                        return true;
++                    }
++
++                    boolean bl = world.isWaterAt(pos.west()) && world.isWaterAt(pos.east()) && world.isWaterAt(pos.north()) && world.isWaterAt(pos.south());
++                    if (!bl) {
++                        return true;
++                    }
++                }
++            }
++
++            return false;
++        }
++    }
++
++    public boolean coldEnoughToSnow(BlockPos pos) {
++        return !this.warmEnoughToRain(pos);
++    }
++
++    public boolean warmEnoughToRain(BlockPos pos) {
++        return this.getTemperature(pos) >= 0.15F;
++    }
++
++    public boolean shouldMeltFrozenOceanIcebergSlightly(BlockPos pos) {
++        return this.getTemperature(pos) > 0.1F;
++    }
++
++    public boolean shouldSnow(LevelReader world, BlockPos pos) {
++        if (this.warmEnoughToRain(pos)) {
++            return false;
++        } else {
++            if (pos.getY() >= world.getMinBuildHeight() && pos.getY() < world.getMaxBuildHeight() && world.getBrightness(LightLayer.BLOCK, pos) < 10) {
++                BlockState blockState = world.getBlockState(pos);
++                if ((blockState.isAir() || blockState.is(Blocks.SNOW)) && Blocks.SNOW.defaultBlockState().canSurvive(world, pos)) {
++                    return true;
++                }
++            }
++
++            return false;
++        }
++    }
++
++    public BiomeGenerationSettings getGenerationSettings() {
++        return this.generationSettings;
++    }
++
++    public int getFogColor() {
++        return this.specialEffects.getFogColor();
++    }
++
++    public int getGrassColor(double x, double z) {
++        int i = this.specialEffects.getGrassColorOverride().orElseGet(this::getGrassColorFromTexture);
++        return this.specialEffects.getGrassColorModifier().modifyColor(x, z, i);
++    }
++
++    private int getGrassColorFromTexture() {
++        double d = (double)Mth.clamp(this.climateSettings.temperature, 0.0F, 1.0F);
++        double e = (double)Mth.clamp(this.climateSettings.downfall, 0.0F, 1.0F);
++        return GrassColor.get(d, e);
++    }
++
++    public int getFoliageColor() {
++        return this.specialEffects.getFoliageColorOverride().orElseGet(this::getFoliageColorFromTexture);
++    }
++
++    private int getFoliageColorFromTexture() {
++        double d = (double)Mth.clamp(this.climateSettings.temperature, 0.0F, 1.0F);
++        double e = (double)Mth.clamp(this.climateSettings.downfall, 0.0F, 1.0F);
++        return FoliageColor.get(d, e);
++    }
++
++    public float getBaseTemperature() {
++        return this.climateSettings.temperature;
++    }
++
++    public BiomeSpecialEffects getSpecialEffects() {
++        return this.specialEffects;
++    }
++
++    public int getWaterColor() {
++        return this.specialEffects.getWaterColor();
++    }
++
++    public int getWaterFogColor() {
++        return this.specialEffects.getWaterFogColor();
++    }
++
++    public Optional<AmbientParticleSettings> getAmbientParticle() {
++        return this.specialEffects.getAmbientParticleSettings();
++    }
++
++    public Optional<Holder<SoundEvent>> getAmbientLoop() {
++        return this.specialEffects.getAmbientLoopSoundEvent();
++    }
++
++    public Optional<AmbientMoodSettings> getAmbientMood() {
++        return this.specialEffects.getAmbientMoodSettings();
++    }
++
++    public Optional<AmbientAdditionsSettings> getAmbientAdditions() {
++        return this.specialEffects.getAmbientAdditionsSettings();
++    }
++
++    public Optional<Music> getBackgroundMusic() {
++        return this.specialEffects.getBackgroundMusic();
++    }
++
++    public static class BiomeBuilder {
++        private boolean hasPrecipitation = true;
++        @Nullable
++        private Float temperature;
++        private Biome.TemperatureModifier temperatureModifier = Biome.TemperatureModifier.NONE;
++        @Nullable
++        private Float downfall;
++        @Nullable
++        private BiomeSpecialEffects specialEffects;
++        @Nullable
++        private MobSpawnSettings mobSpawnSettings;
++        @Nullable
++        private BiomeGenerationSettings generationSettings;
++
++        public Biome.BiomeBuilder hasPrecipitation(boolean precipitation) {
++            this.hasPrecipitation = precipitation;
++            return this;
++        }
++
++        public Biome.BiomeBuilder temperature(float temperature) {
++            this.temperature = temperature;
++            return this;
++        }
++
++        public Biome.BiomeBuilder downfall(float downfall) {
++            this.downfall = downfall;
++            return this;
++        }
++
++        public Biome.BiomeBuilder specialEffects(BiomeSpecialEffects effects) {
++            this.specialEffects = effects;
++            return this;
++        }
++
++        public Biome.BiomeBuilder mobSpawnSettings(MobSpawnSettings spawnSettings) {
++            this.mobSpawnSettings = spawnSettings;
++            return this;
++        }
++
++        public Biome.BiomeBuilder generationSettings(BiomeGenerationSettings generationSettings) {
++            this.generationSettings = generationSettings;
++            return this;
++        }
++
++        public Biome.BiomeBuilder temperatureAdjustment(Biome.TemperatureModifier temperatureModifier) {
++            this.temperatureModifier = temperatureModifier;
++            return this;
++        }
++
++        public Biome build() {
++            if (this.temperature != null && this.downfall != null && this.specialEffects != null && this.mobSpawnSettings != null && this.generationSettings != null) {
++                return new Biome(new Biome.ClimateSettings(this.hasPrecipitation, this.temperature, this.temperatureModifier, this.downfall), this.specialEffects, this.generationSettings, this.mobSpawnSettings);
++            } else {
++                throw new IllegalStateException("You are missing parameters to build a proper biome\n" + this);
++            }
++        }
++
++        @Override
++        public String toString() {
++            return "BiomeBuilder{\nhasPrecipitation=" + this.hasPrecipitation + ",\ntemperature=" + this.temperature + ",\ntemperatureModifier=" + this.temperatureModifier + ",\ndownfall=" + this.downfall + ",\nspecialEffects=" + this.specialEffects + ",\nmobSpawnSettings=" + this.mobSpawnSettings + ",\ngenerationSettings=" + this.generationSettings + ",\n}";
++        }
++    }
++
++    public static record ClimateSettings(boolean hasPrecipitation, float temperature, Biome.TemperatureModifier temperatureModifier, float downfall) {
++        public static final MapCodec<Biome.ClimateSettings> CODEC = RecordCodecBuilder.mapCodec((instance) -> {
++            return instance.group(Codec.BOOL.fieldOf("has_precipitation").forGetter((weather) -> {
++                return weather.hasPrecipitation;
++            }), Codec.FLOAT.fieldOf("temperature").forGetter((weather) -> {
++                return weather.temperature;
++            }), Biome.TemperatureModifier.CODEC.optionalFieldOf("temperature_modifier", Biome.TemperatureModifier.NONE).forGetter((weather) -> {
++                return weather.temperatureModifier;
++            }), Codec.FLOAT.fieldOf("downfall").forGetter((weather) -> {
++                return weather.downfall;
++            })).apply(instance, Biome.ClimateSettings::new);
++        });
++    }
++
++    public static enum Precipitation {
++        NONE,
++        RAIN,
++        SNOW;
++    }
++
++    public static enum TemperatureModifier implements StringRepresentable {
++        NONE("none") {
++            @Override
++            public float modifyTemperature(BlockPos pos, float temperature) {
++                return temperature;
++            }
++        },
++        FROZEN("frozen") {
++            @Override
++            public float modifyTemperature(BlockPos pos, float temperature) {
++                double d = Biome.FROZEN_TEMPERATURE_NOISE.getValue((double)pos.getX() * 0.05D, (double)pos.getZ() * 0.05D, false) * 7.0D;
++                double e = Biome.BIOME_INFO_NOISE.getValue((double)pos.getX() * 0.2D, (double)pos.getZ() * 0.2D, false);
++                double f = d + e;
++                if (f < 0.3D) {
++                    double g = Biome.BIOME_INFO_NOISE.getValue((double)pos.getX() * 0.09D, (double)pos.getZ() * 0.09D, false);
++                    if (g < 0.8D) {
++                        return 0.2F;
++                    }
++                }
++
++                return temperature;
++            }
++        };
++
++        private final String name;
++        public static final Codec<Biome.TemperatureModifier> CODEC = StringRepresentable.fromEnum(Biome.TemperatureModifier::values);
++
++        public abstract float modifyTemperature(BlockPos pos, float temperature);
++
++        TemperatureModifier(String name) {
++            this.name = name;
++        }
++
++        public String getName() {
++            return this.name;
++        }
++
++        @Override
++        public String getSerializedName() {
++            return this.name;
++        }
++    }
++}
+diff --git a/src/main/java/net/minecraft/world/level/storage/loot/LootParams.java b/src/main/java/net/minecraft/world/level/storage/loot/LootParams.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..e43d07ccdd36f0c9f5b8e9c74cf0d87e17eec66a
+--- /dev/null
++++ b/src/main/java/net/minecraft/world/level/storage/loot/LootParams.java
+@@ -0,0 +1,144 @@
++package net.minecraft.world.level.storage.loot;
++
++import com.google.common.collect.Maps;
++import com.google.common.collect.Sets;
++import java.util.Map;
++import java.util.NoSuchElementException;
++import java.util.Set;
++import java.util.function.Consumer;
++import javax.annotation.Nullable;
++import net.minecraft.resources.ResourceLocation;
++import net.minecraft.server.level.ServerLevel;
++import net.minecraft.world.item.ItemStack;
++import net.minecraft.world.level.storage.loot.parameters.LootContextParam;
++import net.minecraft.world.level.storage.loot.parameters.LootContextParamSet;
++
++public class LootParams {
++    private final ServerLevel level;
++    private final Map<LootContextParam<?>, Object> params;
++    private final Map<ResourceLocation, LootParams.DynamicDrop> dynamicDrops;
++    private final float luck;
++
++    public LootParams(ServerLevel world, Map<LootContextParam<?>, Object> parameters, Map<ResourceLocation, LootParams.DynamicDrop> dynamicDrops, float luck) {
++        this.level = world;
++        this.params = parameters;
++        this.dynamicDrops = dynamicDrops;
++        this.luck = luck;
++    }
++
++    public ServerLevel getLevel() {
++        return this.level;
++    }
++
++    public boolean hasParam(LootContextParam<?> parameter) {
++        return this.params.containsKey(parameter);
++    }
++
++    public <T> T getParameter(LootContextParam<T> parameter) {
++        T object = (T)this.params.get(parameter);
++        if (object == null) {
++            throw new NoSuchElementException(parameter.getName().toString());
++        } else {
++            return object;
++        }
++    }
++
++    @Nullable
++    public <T> T getOptionalParameter(LootContextParam<T> parameter) {
++        return (T)this.params.get(parameter);
++    }
++
++    @Nullable
++    public <T> T getParamOrNull(LootContextParam<T> parameter) {
++        return (T)this.params.get(parameter);
++    }
++
++    public void addDynamicDrops(ResourceLocation id, Consumer<ItemStack> lootConsumer) {
++        LootParams.DynamicDrop dynamicDrop = this.dynamicDrops.get(id);
++        if (dynamicDrop != null) {
++            dynamicDrop.add(lootConsumer);
++        }
++
++    }
++
++    public float getLuck() {
++        return this.luck;
++    }
++
++    public static class Builder {
++        private final ServerLevel level;
++        private final Map<LootContextParam<?>, Object> params = Maps.newIdentityHashMap();
++        private final Map<ResourceLocation, LootParams.DynamicDrop> dynamicDrops = Maps.newHashMap();
++        private float luck;
++
++        public Builder(ServerLevel world) {
++            this.level = world;
++        }
++
++        public ServerLevel getLevel() {
++            return this.level;
++        }
++
++        public <T> LootParams.Builder withParameter(LootContextParam<T> parameter, T value) {
++            this.params.put(parameter, value);
++            return this;
++        }
++
++        public <T> LootParams.Builder withOptionalParameter(LootContextParam<T> parameter, @Nullable T value) {
++            if (value == null) {
++                this.params.remove(parameter);
++            } else {
++                this.params.put(parameter, value);
++            }
++
++            return this;
++        }
++
++        public <T> T getParameter(LootContextParam<T> parameter) {
++            T object = (T)this.params.get(parameter);
++            if (object == null) {
++                throw new NoSuchElementException(parameter.getName().toString());
++            } else {
++                return object;
++            }
++        }
++
++        @Nullable
++        public <T> T getOptionalParameter(LootContextParam<T> parameter) {
++            return (T)this.params.get(parameter);
++        }
++
++        public LootParams.Builder withDynamicDrop(ResourceLocation id, LootParams.DynamicDrop dynamicDrop) {
++            LootParams.DynamicDrop dynamicDrop2 = this.dynamicDrops.put(id, dynamicDrop);
++            if (dynamicDrop2 != null) {
++                throw new IllegalStateException("Duplicated dynamic drop '" + this.dynamicDrops + "'");
++            } else {
++                return this;
++            }
++        }
++
++        public LootParams.Builder withLuck(float luck) {
++            this.luck = luck;
++            return this;
++        }
++
++        public LootParams create(LootContextParamSet contextType) {
++            Set<LootContextParam<?>> set = Sets.difference(this.params.keySet(), contextType.getAllowed());
++            if (!set.isEmpty()) {
++                throw new IllegalArgumentException("Parameters not allowed in this parameter set: " + set);
++            } else {
++                Set<LootContextParam<?>> set2 = Sets.difference(contextType.getRequired(), this.params.keySet());
++                if (!set2.isEmpty()) {
++                    throw new IllegalArgumentException("Missing required parameters: " + set2);
++                } else {
++                    return new LootParams(this.level, this.params, this.dynamicDrops, this.luck);
++                }
++            }
++        }
++    }
++
++    @FunctionalInterface
++    public interface DynamicDrop {
++        void add(Consumer<ItemStack> lootConsumer);
++    }
++}
+diff --git a/src/main/java/net/minecraft/world/phys/shapes/EntityCollisionContext.java b/src/main/java/net/minecraft/world/phys/shapes/EntityCollisionContext.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ebe65474a4a05ff1637d7f37ebcfe690af59def5
+--- /dev/null
++++ b/src/main/java/net/minecraft/world/phys/shapes/EntityCollisionContext.java
+@@ -0,0 +1,69 @@
++package net.minecraft.world.phys.shapes;
++
++import java.util.function.Predicate;
++import javax.annotation.Nullable;
++import net.minecraft.core.BlockPos;
++import net.minecraft.core.Direction;
++import net.minecraft.world.entity.Entity;
++import net.minecraft.world.entity.LivingEntity;
++import net.minecraft.world.item.Item;
++import net.minecraft.world.item.ItemStack;
++import net.minecraft.world.level.material.FluidState;
++
++public class EntityCollisionContext implements CollisionContext {
++    protected static final CollisionContext EMPTY = new EntityCollisionContext(false, -Double.MAX_VALUE, ItemStack.EMPTY, (fluidState) -> {
++        return false;
++    }, (Entity)null) {
++        @Override
++        public boolean isAbove(VoxelShape shape, BlockPos pos, boolean defaultValue) {
++            return defaultValue;
++        }
++    };
++    private final boolean descending;
++    private final double entityBottom;
++    private final ItemStack heldItem;
++    private final Predicate<FluidState> canStandOnFluid;
++    @Nullable
++    private final Entity entity;
++
++    protected EntityCollisionContext(boolean descending, double minY, ItemStack heldItem, Predicate<FluidState> walkOnFluidPredicate, @Nullable Entity entity) {
++        this.descending = descending;
++        this.entityBottom = minY;
++        this.heldItem = heldItem;
++        this.canStandOnFluid = walkOnFluidPredicate;
++        this.entity = entity;
++    }
++
++    /** @deprecated */
++    @Deprecated
++    protected EntityCollisionContext(Entity entity) {
++        this(entity.isDescending(), entity.getY(), entity instanceof LivingEntity ? ((LivingEntity)entity).getMainHandItem() : ItemStack.EMPTY, entity instanceof LivingEntity ? ((LivingEntity)entity)::canStandOnFluid : (fluidState) -> {
++            return false;
++        }, entity);
++    }
++
++    @Override
++    public boolean isHoldingItem(Item item) {
++        return this.heldItem.is(item);
++    }
++
++    @Override
++    public boolean canStandOnFluid(FluidState stateAbove, FluidState state) {
++        return this.canStandOnFluid.test(state) && !stateAbove.getType().isSame(state.getType());
++    }
++
++    @Override
++    public boolean isDescending() {
++        return this.descending;
++    }
++
++    @Override
++    public boolean isAbove(VoxelShape shape, BlockPos pos, boolean defaultValue) {
++        return this.entityBottom > (double)pos.getY() + shape.max(Direction.Axis.Y) - (double)1.0E-5F;
++    }
++
++    @Nullable
++    public Entity getEntity() {
++        return this.entity;
++    }
++}
