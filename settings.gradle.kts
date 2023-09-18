@@ -5,5 +5,5 @@ pluginManagement {
     }
 }
 
-rootProject.name = "pufferfish"
-include("pufferfish-api", "pufferfish-server")
+rootProject.name = "castawayserver"
+include("castaway-api", "castaway-server")
